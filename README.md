@@ -3,6 +3,9 @@
 对 2026-08-31 晚间那一轮 SCMG 微调（脚本散落在 `/tmp/`，产物在 `/tmp/scmg_*`）的**方法学返工 + 下游重做**。
 原目录 `/home/ubuntu/luad_invasion`（上游图谱/空转结果）与 `/home/ubuntu/scmg_workspace`（SCMG 代码与官方权重）**只读，未修改**。
 
+> **先看 [`HANDOVER.md`](HANDOVER.md)** —— 进度快照：什么已验证、什么正卡住、什么结论还不能信。
+> 权威分析结果在 [`results/REPORT.md`](results/REPORT.md)（英文 9 节）。
+
 ## 0. 先看这里：该用哪个权重
 
 | 用途 | 路径 | 说明 |

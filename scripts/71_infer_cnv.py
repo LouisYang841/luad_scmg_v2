@@ -10,7 +10,7 @@ Statistic (inferCNV's core):
   2. row-centre each cell (per-cell median over used genes) to kill library/state offset;
   3. column-centre each gene by the median of REFERENCE cells;
   4. rolling mean over W consecutive genes, never crossing a chromosome;
-  5. summarise to 46 chromosome arms; score = mean |arm|.
+  5. summarise to gene-bearing chromosome arms; score = mean |arm|.
 
 Honest null: the reference is HALF of the adjacent-normal normal-epithelium cells
 (per dataset, split by index parity); the OTHER half is scored but never contributed to
@@ -22,16 +22,32 @@ Positive controls that must pass before anything else is believed:
 GSE189357 and GSE148071 contain ANNOTATED malignant epithelium next to annotated normal
 epithelium in the same dataset.
 """
-import os, sys, json
+import argparse, os, sys, json
 import numpy as np, pandas as pd
 import cupy as cp
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import luadlib as L
 
-OUT = f"{L.RES}/cnv"; os.makedirs(OUT, exist_ok=True)
+DATASETS = ["GSE131907", "GSE189357", "GSE148071"]
+parser = argparse.ArgumentParser(description="GPU expression-based CNV inference")
+parser.add_argument("--datasets", nargs="+", default=DATASETS,
+                    help="Datasets to score (space- or comma-separated)")
+args = parser.parse_args()
+requested = [ds for value in args.datasets for ds in value.split(",")]
+unknown = sorted(set(requested) - set(DATASETS))
+if unknown:
+    parser.error(f"unknown datasets: {', '.join(unknown)}")
+TARGETS = [ds for ds in DATASETS if ds in requested]
+if not TARGETS:
+    parser.error("at least one dataset is required")
+
+OUT_ROOT = f"{L.RES}/cnv"
+OUT = OUT_ROOT if TARGETS == DATASETS else f"{OUT_ROOT}/{'_'.join(TARGETS)}"
+os.makedirs(OUT, exist_ok=True)
 W = int(os.environ.get("CNV_W", "100"))
 EXPL = 0.10
 CHROMS = [str(i) for i in range(1, 23)] + ["X"]
+print(f"datasets: {', '.join(TARGETS)}\noutput: {OUT}", flush=True)
 
 order = pd.read_csv(f"{L.DAT}/cell_order.csv")
 ann = pd.read_csv(f"{L.RES}/cell_annotations_clean.csv", index_col=0)
@@ -74,7 +90,7 @@ print("\nsite x dataset:", pd.crosstab(meta.dataset, meta.site).to_string())
 
 # ---- reference / held-out-null split ----
 REF, NULLK = {}, {}
-for ds in ["GSE131907", "GSE189357", "GSE148071"]:
+for ds in TARGETS:
     sel = meta[(meta.dataset == ds) & (meta.compartment_clean == "normal_alveolar_epithelial")]
     if ds == "GSE131907":
         sel = sel[sel.site.astype(str).str.contains("adjacent_normal")]
@@ -89,6 +105,9 @@ for ds in ["GSE131907", "GSE189357", "GSE148071"]:
     REF[ds] = idx[idx % 2 == 0]        # even positional rows -> reference
     NULLK[ds] = idx[idx % 2 == 1]      # odd rows -> held-out matched-state null
     print(f"  {ds}: ref={len(REF[ds]):,}  null_holdout={len(NULLK[ds]):,}  (annotated normal epi)")
+missing_ref = [ds for ds in TARGETS if ds not in REF]
+if missing_ref:
+    raise RuntimeError(f"no usable normal reference for: {', '.join(missing_ref)}")
 
 X = L.load_X_std()          # 11.5 GB fp16, GPU-resident (do not use cp.load: pickled header)
 
@@ -105,6 +124,7 @@ STAT = {}
 for ds, idx in REF.items():
     B = X[np.ix_(idx, cols)].astype(cp.float32)
     expressed = cp.asnumpy((B > 0).mean(0)) >= EXPL
+    B -= cp.median(B, 1, keepdims=True)
     med = cp.asnumpy(cp.median(B, 0)).astype(np.float32)
     STAT[ds] = (expressed, med)
     del B
@@ -133,29 +153,34 @@ def arm_scores(rows, ds):
         for c in np.unique(CH[gcols_local]):
             m = CH[gcols_local] == c
             v = V[:, m]; n = v.shape[1]
-            w = max(3, min(W, (n - 1) | 1))
+            w = max(3, min(W, n))
             if n <= w:
                 Sm[:, m] = v.mean(1, keepdims=True); continue
-            pad = w // 2
-            vp = cp.pad(v, ((0, 0), (pad, pad)), mode="edge")
-            cs = cp.cumsum(vp, 1)
+            pad_left, pad_right = (w - 1) // 2, w // 2
+            vp = cp.pad(v, ((0, 0), (pad_left, pad_right)), mode="edge")
+            cs = cp.cumsum(cp.pad(vp, ((0, 0), (1, 0))), 1)
             Sm[:, m] = (cs[:, w:] - cs[:, :-w]) / w
-        S = cp.asnumpy(Sm)
-        agg = np.zeros((len(b), nA), np.float32)
-        np.add.at(agg, (np.repeat(np.arange(len(b)), len(arm_of)), np.tile(arm_of, len(b))), S.ravel())
-        res[s:s + len(b)] = agg / np.maximum(cnt, 1)[None, :]
-        del V, Sm, S, agg
+        agg = cp.zeros((len(b), nA), cp.float32)
+        for ai in range(nA):
+            agg[:, ai] = Sm[:, arm_of == ai].sum(1)
+        res[s:s + len(b)] = cp.asnumpy(agg / cp.maximum(cp.asarray(cnt), 1)[None, :])
+        del V, Sm, agg
     return res
 
 ALL = meta.index.values
+selected_rows = meta.index[meta.dataset.isin(TARGETS)].to_numpy()
 AM = np.zeros((len(ALL), len(ARMS)), np.float32)
 for ds in STAT:
     ii = meta.index[meta.dataset.values == ds]
     if len(ii) == 0: continue
     AM[ii] = arm_scores(ii, ds)
     print(f"  scored {ds}: {len(ii):,} cells", flush=True)
-AMdf = pd.DataFrame(AM, columns=ARMS, index=meta.barcode.astype(str))
-AMdf.to_csv(f"{OUT}/cnv_arm_matrix.csv.gz", compression="gzip")
+AMdf = pd.DataFrame(AM[selected_rows], columns=ARMS,
+                    index=meta.loc[selected_rows, "barcode"].astype(str))
+arm_path = f"{OUT}/cnv_arm_matrix.csv.gz"
+arm_tmp = f"{arm_path}.tmp"
+AMdf.to_csv(arm_tmp, compression="gzip")
+os.replace(arm_tmp, arm_path)
 
 # ---- honest null & thresholds ----
 null_rows = np.concatenate([NULLK[ds] for ds in NULLK])
@@ -169,33 +194,42 @@ meta["cnv_amp"] = AM.clip(min=0).sum(1)
 meta["cnv_del"] = (-AM.clip(max=0)).sum(1)
 meta["n_arms_dev"] = (np.abs(AM) > 0.05).sum(1)
 meta["cnv_call"] = meta["cnv_load"] > thr
-meta.index = meta.barcode.astype(str)
-meta[["dataset", "patient_id", "site", "stage", "compartment_clean",
-      "cnv_load", "cnv_amp", "cnv_del", "n_arms_dev", "cnv_call"]].to_csv(f"{OUT}/cnv_per_cell.csv")
+meta["is_null_holdout"] = meta.index.isin(null_rows)
 
-# ---- validation ----
+# ---- validation (normal cells are held out from reference construction) ----
 from sklearn.metrics import roc_auc_score
-def auroc(ds, a_lab, b_lab):
-    sub = meta[(meta.dataset == ds)]
-    A = sub[sub.compartment_clean == a_lab].cnv_load.values
-    B = sub[sub.compartment_clean == b_lab].cnv_load.values
+def auroc(ds, a_lab):
+    A = meta[(meta.dataset == ds) & (meta.compartment_clean == a_lab)].cnv_load.values
+    B = meta.loc[NULLK.get(ds, np.array([], dtype=int)), "cnv_load"].values
     if len(A) < 20 or len(B) < 20: return np.nan, 0, 0
     return roc_auc_score(np.r_[np.ones(len(A)), np.zeros(len(B))], np.r_[A, B]), len(A), len(B)
 
-rep = {"W": W, "n_genes": int(n_genes), "thr_q99_matched_null": thr,
+rep = {"datasets": TARGETS, "device": "cuda (CuPy)", "W": W,
+       "n_genes": int(n_genes), "thr_q99_matched_null": thr,
        "n_ref": {k: int(len(v)) for k, v in REF.items()},
        "n_null_holdout": {k: int(len(v)) for k, v in NULLK.items()},
        "null_median": float(np.median(null_load)), "null_q99": thr,
        "positive_controls": {}}
-for ds in ["GSE189357", "GSE148071", "GSE131907"]:
-    for lab in ["malignant_epithelium"]:
-        u, na, nb = auroc(ds, lab, "normal_alveolar_epithelial")
-        rep["positive_controls"][f"{ds}_{lab}_vs_normal_epi_AUROC"] = None if np.isnan(u) else round(float(u), 4)
-        rep["positive_controls"][f"{ds}_n"] = [na, nb]
-meta["is_null_holdout"] = False
-for ds in NULLK: meta.loc[NULLK[ds], "is_null_holdout"] = True
-rep["frac_called_overall"] = round(float(meta.cnv_call.mean()), 4)
-rep["frac_called_by_group"] = meta.groupby(["dataset", "compartment_clean"]).cnv_call.mean().round(3).to_dict()
-rep["median_load_by_group"] = meta.groupby(["dataset", "compartment_clean"]).cnv_load.median().round(4).to_dict()
-json.dump(rep, open(f"{OUT}/cnv_summary.json", "w"), indent=1)
-print(json.dumps(rep, indent=1)[:2000])
+for ds in TARGETS:
+    u, na, nb = auroc(ds, "malignant_epithelium")
+    rep["positive_controls"][f"{ds}_malignant_epithelium_vs_heldout_normal_epi_AUROC"] = (
+        None if np.isnan(u) else round(float(u), 4))
+    rep["positive_controls"][f"{ds}_n"] = [na, nb]
+
+scored_meta = meta.loc[selected_rows].copy()
+def grouped_values(series):
+    return {"|".join(map(str, key)): float(value) for key, value in series.items()}
+
+rep["frac_called_overall"] = round(float(scored_meta.cnv_call.mean()), 4)
+rep["frac_called_by_group"] = grouped_values(
+    scored_meta.groupby(["dataset", "compartment_clean"]).cnv_call.mean().round(3))
+rep["median_load_by_group"] = grouped_values(
+    scored_meta.groupby(["dataset", "compartment_clean"]).cnv_load.median().round(4))
+
+scored_meta.index = scored_meta.barcode.astype(str)
+scored_meta[["dataset", "patient_id", "site", "stage", "compartment_clean",
+             "cnv_load", "cnv_amp", "cnv_del", "n_arms_dev", "cnv_call",
+             "is_null_holdout"]].to_csv(f"{OUT}/cnv_per_cell.csv")
+with open(f"{OUT}/cnv_summary.json", "w") as f:
+    json.dump(rep, f, indent=1)
+print(json.dumps(rep, indent=1))

@@ -35,6 +35,12 @@ def load_X_memmap():
                      shape=(len(load_order()), NG))
 
 
+def load_X_std():
+    """Load the standard matrix into GPU memory as a CuPy array."""
+    import cupy as cp
+    return cp.asarray(load_X_memmap())
+
+
 def load_order():
     return pd.read_csv(f"{DAT}/cell_order.csv")
 
