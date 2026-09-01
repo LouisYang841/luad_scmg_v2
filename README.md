@@ -170,4 +170,8 @@ luad_scmg_v2/
 2. **报告生成顺序**：`49_report_en.py` 必须最后跑（它整篇重写 `REPORT.md`）。
 3. 脚本内文本用英文（见 §2F 约定）。
 4. `results/summary_rework.png` 与 `niches/niche_comparison.png` **未经人工目视核验**（当前模型不支持图像输入），接手时请先看一眼版式与坐标轴。
-5. 训练脚本只固定了 `torch.manual_seed` + `np.random.seed`；faiss GPU / TF32 / bf16 路径下不保证逐位可复现（指标可比，小数点末位不可比）。
+5. **权威细胞数**：GSE131907 183,736 / GSE189357 95,624 / GSE148071 37,329，合计 316,689。
+   已在 `h5ad.obs`、`data/cell_order.csv`、`results/cell_annotations_clean.csv` 三处逐细胞核对为 0 不一致。
+   交接时曾有一处口头结论误用旧分组，把 GSE148071 说成"0 个恶性上皮"——实际是
+   21,428 个 Malignant 桶细胞里 13,412 个为恶性上皮、8,016 个不是（见 REPORT §1b）。**别照抄旧消息。**
+6. 训练脚本只固定了 `torch.manual_seed` + `np.random.seed`；faiss GPU / TF32 / bf16 路径下不保证逐位可复现（指标可比，小数点末位不可比）。
