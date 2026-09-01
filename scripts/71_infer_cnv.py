@@ -7,10 +7,20 @@ reference from the very annotation whose correctness is under test.
 
 Statistic (inferCNV's core):
   1. GENCODE protein_coding genes on chr1-22,X, ordered by position;
-  2. row-centre each cell (per-cell median over used genes) to kill library/state offset;
-  3. column-centre each gene by the median of REFERENCE cells;
-  4. rolling mean over W consecutive genes, never crossing a chromosome;
-  5. summarise to gene-bearing chromosome arms; score = mean |arm|.
+  2. column-centre each gene by the median of the REFERENCE cells;
+  3. clip each gene to +-CNV_CLIP * (its reference MAD), so a handful of outlier
+     genes cannot dominate an arm mean;
+  4. ONLY THEN row-centre each cell (subtract its genome-wide mean). This order is
+     load-bearing -- see the note above the reference-statistics block;
+  5. rolling mean over W consecutive genes, never crossing a chromosome;
+  6. summarise to gene-bearing chromosome arms; score = mean |arm|.
+
+Column-index convention (this is the bug that produced the invalid AUROC 0.395):
+`cols` below is indexed in GENOMIC order (chr1 -> chrX, by start) because the sliding
+window and the arm aggregation are only meaningful in that order. It is NOT the order
+of `data/std_genes.npy`. Keeping both arrays around and picking the wrong one silently
+averages genes that merely sit next to each other in the standard gene list, which
+reduces the whole score to noise. `cols_std_order` exists only to build `cols`.
 
 Honest null: the reference is HALF of the adjacent-normal normal-epithelium cells
 (per dataset, split by index parity); the OTHER half is scored but never contributed to
@@ -18,9 +28,10 @@ the reference. Thresholds come from that held-out half, so the null is measured 
 of the exact same biological state rather than on the reference cells themselves
 (which would make the null artificially tight and the calls circular).
 
-Positive controls that must pass before anything else is believed:
-GSE189357 and GSE148071 contain ANNOTATED malignant epithelium next to annotated normal
-epithelium in the same dataset.
+Positive control: GSE148071 is the ONLY usable one. Its 61 patients split cleanly into
+P1-P5 (8,016 normal-alveolar cells, zero malignant) and P6-P61 (13,412 malignant
+epithelial cells, zero normal). GSE189357 has 0 annotated normal epithelium and
+GSE131907 has 0 annotated malignant epithelium, so neither can validate anything here.
 """
 import argparse, os, sys, json
 import numpy as np, pandas as pd
@@ -45,28 +56,37 @@ OUT_ROOT = f"{L.RES}/cnv"
 OUT = OUT_ROOT if TARGETS == DATASETS else f"{OUT_ROOT}/{'_'.join(TARGETS)}"
 os.makedirs(OUT, exist_ok=True)
 W = int(os.environ.get("CNV_W", "100"))
-EXPL = 0.10
+CLIP = float(os.environ.get("CNV_CLIP", "3"))
+EXPL = float(os.environ.get("CNV_EXPL", "0.10"))
+MAD_FLOOR = float(os.environ.get("CNV_MAD_FLOOR", "0.05"))
 CHROMS = [str(i) for i in range(1, 23)] + ["X"]
 print(f"datasets: {', '.join(TARGETS)}\noutput: {OUT}", flush=True)
 
 order = pd.read_csv(f"{L.DAT}/cell_order.csv")
 ann = pd.read_csv(f"{L.RES}/cell_annotations_clean.csv", index_col=0)
-pos = pd.read_csv("/home/ubuntu/luad_scmg_v2/results/gene_positions_gencode44.csv")
+pos = pd.read_csv(f"{L.RES}/gene_positions_gencode44.csv")
 pos = pos[pos.gene_type == "protein_coding"].copy()
 std = np.load(f"{L.DAT}/std_genes.npy", allow_pickle=True).astype(str)
 
 # ---- gene space, positional order ----
 pm = pos.set_index("ensg")
 keep = [g for g in std if g in pm.index]
-cols = np.array([np.where(std == g)[0][0] for g in keep])
+cols_std_order = np.array([np.where(std == g)[0][0] for g in keep])
 gp = pm.loc[keep].reset_index(drop=True)
 gp["chrom"] = gp.chrom.str[3:]
-gp["col"] = cols
+gp["col"] = cols_std_order
 gp = gp[gp.chrom.isin(CHROMS)].copy()
 gp["cnum"] = gp.chrom.map({c: i for i, c in enumerate(CHROMS)})
 gp = gp.sort_values(["cnum", "start"]).reset_index(drop=True)
+
+# Everything below is indexed in this genomic order.
+cols = gp.col.values
+CH = gp.chrom.values
+ARMV = gp.arm.values
+ARMS = sorted(set(ARMV))
 n_genes = len(gp)
 print(f"protein_coding genes on chr1-22,X: {n_genes}")
+print(f"{len(ARMS)} chromosome arms")
 
 # ---- cell meta with clean compartments ----
 meta = order.copy()
@@ -111,47 +131,48 @@ if missing_ref:
 
 X = L.load_X_std()          # 11.5 GB fp16, GPU-resident (do not use cp.load: pickled header)
 
-def row_med(sel):
-    """per-cell median over used genes (needs chunking to stay in memory)"""
-    out = np.zeros(len(sel), np.float32)
-    for s in range(0, len(sel), 20000):
-        b = sel[s:s + 20000]
-        out[s:s + len(b)] = cp.asnumpy(cp.median(X[np.ix_(b, cols)].astype(cp.float32), 1))
-    return out
-
-# ---- reference gene medians + expression filter ----
+# ---- reference gene medians, per-gene scale, expression filter ----
+# Order matters and is easy to get backwards on sparse data. We subtract the reference
+# profile FIRST (gene-wise), clip gene-wise, and only THEN remove each cell's own
+# genome-wide mean. Doing it the other way round is a no-op here: more than half the
+# genes are zero in any given 10x 3' cell, so a per-cell median taken on the raw log
+# values is ~0 and leaves the library-size term in the score -- which then ranks cells
+# by how much RNA they contain (immune 0.11 < malignant epi 0.20 < normal epi 0.23)
+# instead of by copy number.
 STAT = {}
 for ds, idx in REF.items():
     B = X[np.ix_(idx, cols)].astype(cp.float32)
-    expressed = cp.asnumpy((B > 0).mean(0)) >= EXPL
-    B -= cp.median(B, 1, keepdims=True)
-    med = cp.asnumpy(cp.median(B, 0)).astype(np.float32)
-    STAT[ds] = (expressed, med)
+    expressed = np.where(cp.asnumpy((B > 0).mean(0)) >= EXPL)[0]
+    B = B[:, expressed]
+    med = cp.asnumpy(cp.median(B, 0)).astype(np.float32)      # reference level per gene
+    # per-gene scale, used only to bound outliers (never to divide: that would amplify
+    # noise on near-constant low-expressed genes, which are the majority here)
+    mad = cp.asnumpy(cp.median(cp.abs(B - cp.array(med, dtype=cp.float32)[None, :]), 0))
+    mad = np.maximum(mad.astype(np.float32), MAD_FLOOR)
+    STAT[ds] = (expressed, med, mad)
+    print(f"  {ds}: {len(expressed):,}/{n_genes:,} genes pass the {EXPL:.0%}-expressed filter")
     del B
 print("reference gene medians done")
 
-CH = gp.chrom.values
-ARMV = gp.arm.values
-ARMS = sorted(set(ARMV))
-print(f"{len(ARMS)} chromosome arms")
 
 def arm_scores(rows, ds):
-    expressed, med = STAT[ds]
-    gcols_local = np.where(expressed)[0]
-    use_cols = cols[gcols_local]
-    local_arms = ARMV[gcols_local]
-    arm_of = np.array([ARMS.index(a) for a in local_arms])
+    expressed, med, mad = STAT[ds]
+    use_cols = cols[expressed]
+    local_ch = CH[expressed]
+    arm_of = np.array([ARMS.index(a) for a in ARMV[expressed]])
     nA = len(ARMS)
     res = np.zeros((len(rows), nA), np.float32)
     cnt = np.bincount(arm_of, minlength=nA).astype(np.float32)
+    bound = cp.array(CLIP * mad, dtype=cp.float32)
     for s in range(0, len(rows), 8000):
         b = rows[s:s + 8000]
         V = X[np.ix_(b, use_cols)].astype(cp.float32)
-        V -= cp.median(V, 1, keepdims=True)
-        V -= cp.array(med[gcols_local], dtype=cp.float32)[None, :]
+        V -= cp.array(med, dtype=cp.float32)[None, :]        # 1. remove reference level
+        cp.clip(V, -bound, bound, out=V)                     # 2. bound outliers per gene
+        V -= V.mean(1, keepdims=True)                        # 3. only now remove depth
         Sm = cp.zeros_like(V)
-        for c in np.unique(CH[gcols_local]):
-            m = CH[gcols_local] == c
+        for c in np.unique(local_ch):
+            m = local_ch == c
             v = V[:, m]; n = v.shape[1]
             w = max(3, min(W, n))
             if n <= w:
@@ -167,6 +188,7 @@ def arm_scores(rows, ds):
         del V, Sm, agg
     return res
 
+
 ALL = meta.index.values
 selected_rows = meta.index[meta.dataset.isin(TARGETS)].to_numpy()
 AM = np.zeros((len(ALL), len(ARMS)), np.float32)
@@ -181,6 +203,32 @@ arm_path = f"{OUT}/cnv_arm_matrix.csv.gz"
 arm_tmp = f"{arm_path}.tmp"
 AMdf.to_csv(arm_tmp, compression="gzip")
 os.replace(arm_tmp, arm_path)
+del AMdf
+
+# ---- per-patient consensus arm profiles ----
+# A single cell at ~1,100 detected genes is far too sparse to call CNV on; the
+# per-patient median is where arm-level events become visible, and it is what lets us
+# ask whether malignant patients share RECURRENT events (batch effects do not recur
+# on canonical LUAD arms, so this is a much harder test than an AUROC number).
+EPI = {"malignant_epithelium", "normal_alveolar_epithelial"}
+
+
+def consensus(mask, label):
+    rows = meta.index[meta.dataset.isin(TARGETS) & mask].to_numpy()
+    prof = pd.DataFrame(AM[rows], columns=ARMS)
+    prof["dataset"] = meta.loc[rows, "dataset"].values
+    prof["patient_id"] = meta.loc[rows, "patient_id"].values
+    out = prof.groupby(["dataset", "patient_id"])[ARMS].median()
+    out.insert(0, "n_cells", prof.groupby(["dataset", "patient_id"]).size())
+    path = f"{OUT}/cnv_arm_by_patient{'_' + label if label else ''}.csv"
+    out.to_csv(f"{path}.tmp")
+    os.replace(f"{path}.tmp", path)
+    print(f"  wrote {os.path.relpath(path, L.ROOT)}  ({len(out):,} patients)")
+    return out
+
+
+consensus(pd.Series(True, index=meta.index), "")
+consensus(meta.compartment_clean.isin(EPI), "epithelium")
 
 # ---- honest null & thresholds ----
 null_rows = np.concatenate([NULLK[ds] for ds in NULLK])
@@ -204,8 +252,10 @@ def auroc(ds, a_lab):
     if len(A) < 20 or len(B) < 20: return np.nan, 0, 0
     return roc_auc_score(np.r_[np.ones(len(A)), np.zeros(len(B))], np.r_[A, B]), len(A), len(B)
 
-rep = {"datasets": TARGETS, "device": "cuda (CuPy)", "W": W,
-       "n_genes": int(n_genes), "thr_q99_matched_null": thr,
+rep = {"datasets": TARGETS, "device": "cuda (CuPy)", "W": W, "clip": CLIP,
+       "n_genes": int(n_genes),
+       "n_genes_used": {ds: int(len(v[0])) for ds, v in STAT.items()},
+       "thr_q99_matched_null": thr,
        "n_ref": {k: int(len(v)) for k, v in REF.items()},
        "n_null_holdout": {k: int(len(v)) for k, v in NULLK.items()},
        "null_median": float(np.median(null_load)), "null_q99": thr,
