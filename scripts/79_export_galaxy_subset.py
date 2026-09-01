@@ -53,7 +53,10 @@ if counts.data.size and (counts.data.min() < 0 or not np.all(counts.data == np.r
 matrix_path = f"{out_root}/matrix.mtx.gz"
 with gzip.open(matrix_path, "wb") as handle:
     mmwrite(handle, counts.T.tocoo(), field="integer")
-pd.Series(adata.var_names.astype(str)).to_csv(f"{out_root}/genes.tsv", sep="\t", index=False, header=False)
+# 2 columns: Read10X defaults to gene.column=2 and fails on a single-column file.
+pd.DataFrame({"gene_id": adata.var_names.astype(str),
+              "gene_name": adata.var_names.astype(str)}).to_csv(
+    f"{out_root}/genes.tsv", sep="\t", index=False, header=False)
 pd.Series(order.iloc[rows].barcode.astype(str).to_numpy()).to_csv(
     f"{out_root}/barcodes.tsv", sep="\t", index=False, header=False)
 
