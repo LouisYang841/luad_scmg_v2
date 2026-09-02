@@ -170,8 +170,8 @@ luad_scmg_v2/
 
 **2026-09-02 新增（大方向相关，背景见 §10）：**
 
-- [ ] **核实竞争文献（最高优先）**：PMID 35577954 疑似已 benchmark 过 spot→细胞级表达重建（= 方案 B / 第二层的一部分）。若属实，我们的 gap 比笔记认为的窄。必须人工核对原文（理由见 §10.5）。
-- [ ] 判定 CNV 能否充当"外部锚定真值"：自算 AUROC 0.7569（GSE148071）对做下游标签勉强够，**对做 benchmark 真值不够**。见 §10.3。
+- [x] **核实竞争文献**（2026-09-02 完成，用 NCBI E-utilities + Crossref 逐条核对，结果见 §10.5 / §10.9）。
+- [ ] 判定 CNV 能否充当"外部锚定真值"：自算 AUROC 0.7569（GSE148071）对做下游标签勉强够，**对做 benchmark 真值不够**。见 §10.3。**（现在是最高优先——st2traj 已证明 agreement 路线被占，外部锚是唯一剩下的可发表性来源。）**
 - [ ] 定义 CNV 谱系方向性（共享 CNV 事件 → 祖先/衍生），评估其作为轨迹方向外部锚的可行性（§10.3）。
 - [ ] 用 GSE189487 的 15 张 Visium 切片校验合成 spot 的**组成统计量**是否与真实 Visium 匹配（§10.4.3）。
 - [ ] 定最终研究问题措辞：二元"可不可靠" → "在哪个颗粒度上可靠"（§10.2）。
@@ -242,11 +242,35 @@ luad_scmg_v2/
 
 **一个纠正（相对笔记）**：核心实验的**第二、三层不需要真实空间坐标**。真细胞 → 按生态位混成伪 spot → 解卷积 → 组成 → 状态空间 → 轨迹，用 scRNA-seq 就能跑通。真实单细胞分辨率空间数据（Xenium / CosMx / MERFISH）只在验证第一层（空间富集）时才必需。**所以现有数据够做核心实验。**
 
-### 10.5 必须先核实的竞争风险
+### 10.5 竞争风险（2026-09-02 已核实）
 
-- **PMID 35577954**（疑似 Xu et al., *Nat Methods* 2022，"…transcript distribution prediction and cell type deconvolution"）：**如果就是这篇，它已 benchmark 过 spot → 细胞级表达重建，即方案 B / 第二层的一部分**，我们的 gap 比笔记认为的窄。必须人工核对标题、期刊、以及它到底评了哪几层。
-- 顺带核：OSCC TC–LE（Nat Commun 2023）、SpaRx（Brief Bioinform 2023）、scMGCA（Nat Commun 2023）、Cell2location、scGPT（Nat Methods 2024）、两篇解卷积 benchmark。
-- **为什么不能委托 AI 核**：笔记里"目前没有找到一篇论文完成完整闭环"这个立项依据来自同一次 AI 检索；而同一份笔记的第一部分已证明该 AI 给出的 4 篇论文错 3 篇（标题错、期刊错、疑似拼接杜撰）。否定性结论要求比肯定性结论更强的证据——"未检索到"远达不到"不存在"。gap 论证需要系统性检索，不是一次对话。
+> 方法：NCBI E-utilities（esearch / esummary / efetch）+ Crossref API 逐条核对，**不依赖任何 AI 检索**。核验明细见 §10.9。
+
+**结论：gap 保住了，但只剩第三、四层；第一、二层已被占。**
+
+**(1) Li B, …, Qu K. *Nat Methods* 2022;19(6):662-670（PMID 35577954）** —— 标题 "Benchmarking spatial and single-cell transcriptomics integration methods for transcript distribution prediction and cell type deconvolution"。**16 种方法 / 45 配对数据集 + 32 模拟数据集**，评两个任务：
+
+- transcript distribution prediction → Tangram / gimVI / SpaGE 最优；
+- cell type deconvolution → Cell2location / SpatialDWLS / RCTD 最优。
+
+**它吃掉了第一层和第二层**——但评价指标是"预测表达 vs 实测表达"的相关性，即**重建的准确性**，**完全不涉及下游状态空间、轨迹或药物推断**。
+→ 论文 related work 必须显式划界："Li 2022 评的是重建准确性，我们评的是下游可用性"，这是两件事。**第一、二层不能再声称是空白。**
+
+**(2) st2traj（*Bioinformatics*，2026-08-27，PMID 42658029）** —— "Deconvolution-informed trajectory inference for multi-timepoint spatial transcriptomics"。**这正是我们要质疑的那个跨层级接口，已经有人在做方法了**（用 spot-state composition 驱动轨迹推断）。
+
+但它的验证方式是：
+
+> "produced smoother trajectory fields and **stronger agreement with expression-derived marker programs**"
+
+即**正是 §10.3 警告的 agreement-not-accuracy 循环**——没有外部锚。它的 pseudo-spot benchmark 只用来在 5 种解卷积方法里挑一个（DECODE 最优），即只评第一、二层。
+→ **对我们是净利好**：证明这个接口正在被使用、却无人用外部锚验证过。这是比"AI 说没人做过"强得多的立项必要性证据，**应在 Introduction 主动引用**。它是 Bioinformatics 的方法论文，高位刊的验证研究位子仍然空着。
+
+**(3) 两轮定向检索的阴性结果**（2023–2026）：
+
+- `benchmark` + `cell state` + `spatial`（标题检索）→ **0 篇**；
+- `deconvolution` + `reliability/uncertainty` + `downstream` → 7 篇，**逐条看过无直接竞品**（分别是序列→表达预测、细胞类型注释、bulk DNA 系统发生、PitNET 应用、spot 水平 DE 分析）。
+
+**为什么之前不能委托 AI 核**：笔记里"目前没有找到一篇论文完成完整闭环"这个立项依据来自同一次 AI 检索；而同一份笔记的第一部分已证明该 AI 给出的 4 篇论文错 3 篇。核验结果印证了这个担心——见 §10.9 里 SpatialScope 那条**虚构 DOI**。
 
 ### 10.6 发表风险（坦率版）
 
@@ -257,13 +281,38 @@ luad_scmg_v2/
 
 ### 10.7 决策顺序（几天的量级，但决定后面一两年）
 
-1. 判定 CNV 能否当真值（**不依赖 Galaxy**，见 §8）。
-2. 核实 §10.5 的竞争文献。
-3. 定最终研究问题措辞（§10.2）。
+1. **判定 CNV 能否当真值（最高优先，不依赖 Galaxy）**。§10.5(2) 之后这已经不是"加分项"而是**前提**：agreement 路线被 st2traj 占了，外部锚是我们唯一剩下的可发表性来源。见 §10.3。
+2. 研究问题锁死在第三层（+ 第四层）：第一、二层已被 Li 2022 占（§10.5(1)）。
+3. 决定是否把 st2traj 作为正面论据写进 Introduction。
 4. 再投入工程。
+
+（~~核实竞争文献~~ 已于 2026-09-02 完成，见 §10.5 / §10.9。）
 
 ### 10.8 一个已经观察到的预演
 
 `novelty × CNV` 双通道一致性呈**层级结构**（`results/novelty_vs_cnv.json`）：细胞级硬判定 kappa≈0（148071 甚至 −0.01），但 **GSE131907 供体 / 样本级 Spearman 0.6225（p=2.3e-5）**，且部位梯度两法同序。
 
 这个形状——**聚合层一致、细胞层不一致**——几乎必然是那个 benchmark 会跑出的形状。它同时是两件事：支持"颗粒度"提法的证据，以及一个警告——**细胞级对应关系不可主张**（这一点必须写进任何报告）。
+
+### 10.9 引用核验结果（2026-09-02）
+
+来源：NCBI E-utilities（esearch / esummary / efetch）+ Crossref API。**逐条核对，不采信任何 AI 检索结果。**
+
+| 笔记中的引用 | 核验结果 | PMID |
+|---|---|---|
+| OSCC TC–LE（肿瘤核心/边缘） | ✅ Nat Commun 2023;14:5029，标题期刊全对 | 37596273 |
+| SpaRx | ✅ Brief Bioinform 2023;24(5) | 37798249 |
+| scMGCA | ✅ **Nat Commun** 2023;14:400（笔记已纠正过的期刊错误，纠正正确） | 36697410 |
+| Cell2location | ✅ Nat Biotechnol 2022;40:661-671 | 35027729 |
+| Tangram | ✅ Nat Methods 2021;18:1352-1362 | 34711971 |
+| scGPT | ✅ Nat Methods 2024;21:1470-1480 | 38409223 |
+| CellOracle | ✅ Nature 2023;614:742-751 | 36755098 |
+| 解卷积 benchmark | ✅ Nat Commun 2023;14:1548，**"18 方法 / 50 数据集"属实** | 36941264 |
+| Saelens 轨迹 benchmark | ✅ Nat Biotechnol 2019;37:547-554 | 30936559 |
+| 黑色素瘤 CAF + docking | ✅ 真实，但期刊是 **Comput Biol Med** 2023;167:107597（档次远低于笔记暗示） | 37875042 |
+| Li 2022 整合 benchmark | ✅ Nat Methods 2022;19(6):662-670（**第一作者 Li B、通讯 Qu K**，不是"Xu"） | 35577954 |
+| **SpatialScope** | ❌ **笔记给的 DOI `10.1038/s41592-023-01937-1` 不存在**。真实论文在 **Nat Commun**，DOI `10.1038/s41467-023-43629-w`，标题 "Integrating spatial and single-cell transcriptomics data using deep generative models with SpatialScope" | — |
+
+**记 11 对、1 条伪 DOI。** 笔记后半部分（战略讨论）的引用明显比前半部分（AI 给的文献清单）可靠——前半部分已知 4 篇错 3 篇。**但 SpatialScope 这条说明后半部分也不能盲信。**
+
+**→ 硬规则：任何进入 proposal / 论文正文的引用，必须走一遍 PMID 或 Crossref 核验。委托 AI 检索的结果一律视为待核。**
