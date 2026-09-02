@@ -5,6 +5,57 @@
 
 ---
 
+## 0. 2026-09-02 更新（CNV 阶段收尾 + 三项新证据）
+
+接手者先读本节，§1-§8 为 09-01 旧快照（其中 §3 的阻塞已解除，见下）。
+
+**§3 阻塞已解除**：按旧 §3 推荐方案 1 执行 —— 参考组用 (A) 记法的正常上皮，
+阳性对照换成 GSE148071。自算 CNV（`71_infer_cnv.py`，W=100，CuPy）已跑通两数据集：
+GSE148071 阳性对照 AUROC **0.7569**（malignant 13,412 vs held-out normal 4,026；
+修复前的 0.395 记录在 `cnv/GSE148071/positive_control_metrics.json`，是旧版 bug 的残留）。
+
+### 09-01 晚间至 09-02 新增的已验证结论（脚本 81-84，git c13a660+）
+
+1. **novelty × CNV 双通道一致性呈层级结构**（`results/novelty_vs_cnv.json`）：
+   细胞级硬判定 kappa≈0（148071 甚至 -0.01），但 **GSE131907 供体/样本级 Spearman 0.6225
+   (p=2.3e-5)**，且部位梯度两法同序（adjacent 4.7%/1.2% → tumor 19%/10.7% → LN 46%/20.7% →
+   胸水 56%/41%）。**梯度级结论（REPORT §9）被双正交证据钉死；细胞级对应关系不可主张。**
+   另：148071 的 abn95 在两区室都标 ~60% 异常 —— novelty 阈值跨数据集不迁移（batch 效应），
+   报告引用 novelty 时必须注明此局限。
+2. **GSE131907 上皮恶性重建**（`scripts/83_cnv_malignant_recalls.py` →
+   `cnv/GSE131907/epithelium_cnv_calls.csv`）：n=22,003，双证据恶性 2,220（10.1%），
+   单证据 9,550，无证据 10,233；22/39 样本 CNV>5%，19/39 双证据>5%。
+   注意 `patient_id=='GSE131907_Patient'` 是 9,521 细胞的元数据缺失桶（frac_cnv 0.49），
+   不要当真供体。
+3. **GSE131907 配对问题（旧 §8 待办 2）已用 GEO 官方元数据钉死**：
+   `results/gse131907_geo_meta/GSE131907_samples.soft`（SOFT 原文）。
+   10/10 对 LUNG_T##/LUNG_N## 的 `patient id` 完全一致（P0006…P0034），0 矛盾。
+   **编号陷阱**：前缀语义不同 —— P####=原发、P1###=晚期/转移、P2###=正常淋巴结、
+   P3###=脑转移；**跨前缀相同数字是巧合不是同一人**（EBUS_06=P1006 ≠ LUNG_T06=P0006）。
+   同患者跨部位实例：EBUS_06+EFFUSION_06 同为 P1006。
+   因此 81 的配对检验（10/10，p=0.00098）建立在已被官方元数据证实的配对上。
+4. **Galaxy 官方 inferCNV 交叉验证**（`scripts/82_galaxy_vs_own_cnv.py` →
+   `galaxy_vs_own_cnv.json`）：run #1 的 219.8MB "members" 输出实为逐细胞×16,937 基因
+   ratio 矩阵；与自研 cnv_load 的 Spearman **0.598**，top-10% 异常细胞重叠 37%（随机 10%）。
+   解释：基因集/归一化/参考集均不同 → 方向一致、实现各异，自研获部分背书。
+   **run #1 没有正常对照**（8,016 个正常全进了 reference）→ 官方版 AUROC 缺位。
+5. **Galaxy v2 已提交**（`scripts/84_galaxy_resubmit_with_normals.py`）：
+   reference 只留 3,990 非 holdout 正常，4,026 held-out 正常移入 observations
+   （与 71 的 0.7569 同定义，可直接对比）。history `luad_GSE148071_infercnv_v2`
+   = 11ac94870d0bb33a9c8e05f5068ac355，job 4838ba20a6d86765caa987e8b1d01d98。
+   完成后跑 `85`（待写）：下载 observations 矩阵算官方 malignant vs heldout AUROC。
+
+### 接下来（按优先级）
+
+1. Galaxy v2 完成后：下载 observations 矩阵 → 官方 AUROC vs 0.7569（`85`，待写）；
+2. 把 §0 结论并入 `49_report_en.py`（注意 49 会整篇重写 REPORT.md，须改脚本不改成品）；
+3. 旧 §8 剩余待办：5 张 GSE189487 切片 stage 纠错（GEO 原始元数据可同样抓取）；
+   GSE131907 "Patient" 缺失桶的样本归属。
+
+
+
+---
+
 ## 1. 一句话状态
 
 微调与生态位两阶段已完成并入报告；**CNV 自算这一阶段刚开始、还没有任何结果**，
