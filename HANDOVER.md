@@ -45,7 +45,17 @@ GSE148071 阳性对照 AUROC **0.7569**（malignant 13,412 vs held-out normal 4,
    = 11ac94870d0bb33a9c8e05f5068ac355，job 4838ba20a6d86765caa987e8b1d01d98。
    完成后跑 `85`（待写）：下载 observations 矩阵算官方 malignant vs heldout AUROC。
 
+**Galaxy 平台故障补记（09-02 上午）**：Galaxy EU 的 inferCNV 工具自 09-02 起持续秒挂
+（约 90 秒 error），当日 3 次提交全部失败，其中包括用 run#1 原版输入文件的对照提交
+（84b）——本地所有变量（annotation 内容/格式、分组大小、datatype、参数 payload）均已
+排除，判定为平台端故障。昨天同样出现过一次失败 + UI Retry 成功的记录。处置：
+scripts/86_galaxy_retry_loop.py 已在服务器后台运行，每 30 分钟用已上传 datasets 复用
+重提交一次（不重新上传），成功后自动调用 scripts/85_galaxy_v2_auroc.py 计算官方
+malignant vs held-out AUROC 并写入 results/galaxy_v2_auroc.json。log 见
+logs/86_retry_loop.log。
+
 ### 接下来（按优先级）
+
 
 1. Galaxy v2 完成后：下载 observations 矩阵 → 官方 AUROC vs 0.7569（`85`，待写）；
 2. 把 §0 结论并入 `49_report_en.py`（注意 49 会整篇重写 REPORT.md，须改脚本不改成品）；
